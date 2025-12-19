@@ -44,31 +44,39 @@ El documento está organizado en **4 secciones principales**:
 ### **Sección 2: Learning from Model Evaluations**
 
 #### 2.1. Task-Independent Recommendations
-**Concepto:** Recomendaciones de configuraciones que funcionan bien en general, sin necesidad de evaluaciones en la nueva tarea.
+**Concepto:** Recomendaciones de configuraciones que funcionan bien en general (en promedio en muchas tareas), sin necesidad de evaluaciones en la nueva tarea.
 
 **Técnicas principales:**
-- **Rankings globales:** Agregar rankings de múltiples tareas para crear un ranking global
-- **Portfolios de algoritmos:** Conjunto de configuraciones candidatas evaluadas en muchas tareas
-- **Top-K configurations:** Seleccionar las K mejores configuraciones para evaluar en la nueva tarea
+- **Rankings globales:** Construir rankings por tareas (accuracy, AUC, tiempo) y combinarlos en un ranking global estable.
+- **Portfolios de algoritmos:** Seleccionar un conjunto discreto de configuraciones probadas exhaustivamente en múltiples datasets.
+- **Top-K configurations:** Tomar las K mejores del rankings global y ejecutarlas en la nueva tarea para obtener un buen punto de partida.
 
 **Aplicación al proyecto:**
 - ✅ Pueden implementarse rankings de algoritmos basados en rendimiento en datasets de OpenML
 - ✅ Útil para warm-starting la búsqueda de algoritmos
+- ✅ reduce el costo inicial: antes de personalizar, ya partes desde configuraciones estadísticamente robustas.
 
 #### 2.2. Configuration Space Design
-**Concepto:** Aprender qué regiones del espacio de configuración son más relevantes.
+**Concepto:** En vez de buscar la mejor configuración en TODO el espacio,primero aprender qué regiones del espacio de configuración son más relevantes.
 
 **Técnicas:**
-- **Functional ANOVA:** Identificar hiperparámetros importantes según la varianza que explican
-- **Tunability:** Medir la importancia de un hiperparámetro por la ganancia de rendimiento al optimizarlo
-- **Default learning:** Aprender valores por defecto óptimos para hiperparámetros
+- **Functional ANOVA:** Se estiman qué parte de la variabilidad del rendimiento se explica por cada hiperparámetro. Los que generan gran varianza, son importantes. Los que no aportan anda, se pueden fijar o ignorar.
+- **Tunability:** En vez de empezar desde defaults manuales (C=1 en SVM) aprenden: Valores por defecto óptimo estimados a partir de miles de datasets. luego miden cuánta mejora puede obtenerse al tunear cada hiperparametro desde ese default. Esto deja claro: que hiper necesita tuning y cuáles puedes fijar sin remordimiento.
+- **Default learning:** A veces el default depende del dataset: muchos features (un defutla para max_depth)o pocas instancias. Entonces aprenden funciones simples que ahustan el default según los meta-features del dataset. Luego una prueba estadística decide: si un hiperparámetro puede quedarse fijo o si es obligatorio tunearlo.
 
 **Aplicación al proyecto:**
 - ✅ Puede ayudar a reducir el espacio de búsqueda de hiperparámetros
 - ✅ Identificar qué hiperparámetros son más importantes para diferentes tipos de datasets
+- ✅ Puede generar defaults inteligentes para cada modelo en vez de usar valores arbitrarios
+- ✅ Puede diseñar un espacio de configuración reducido que aceleera la optimización automática (Bayesian Optimization, SMAC, Optuna,...)
 
 #### 2.3. Configuration Transfer
-**Concepto:** Transferir conocimiento de tareas previas a una nueva tarea basándose en similitud empírica.
+**Concepto:** Para recomendar buenas configuraciones en una nueva tarea, no basta con mirar rankings globales; necesitas saber qué tareas previas se parecen a la nueva.
+
+**Cómo se hace:**
+- Evalúa algunas configuraciones en la nueva tarea, obtienes $P_new$
+- Comparas con evaluaciones anteriores $P_{i,j}$, encuentra treas similares
+- Ajusta el meta-learner para usar configuraciones que funcionaron en tareas similares.
 
 **Técnicas principales:**
 
@@ -90,68 +98,132 @@ El documento está organizado en **4 secciones principales**:
 - ✅ Active testing puede ser útil para selección eficiente de algoritmos
 
 #### 2.4. Learning Curves
-**Concepto:** Usar información sobre cómo mejora el rendimiento con más datos de entrenamiento.
+
+**Concepto:**
+Las curvas de aprendizaje reflejan cómo mejora el rendimiento de un modelo/configuración a medida que se agregan más datos de entrenamiento. En meta-learning, esta información se transfiere entre tareas para acelerar la búsqueda de buenas configuraciones en datasets nuevos.
 
 **Aplicación:**
-- Predecir rendimiento final basándose en curvas de aprendizaje parciales
-- Detener entrenamiento temprano si se predice bajo rendimiento
+
+* Predecir el rendimiento final de una configuración en un nuevo dataset usando **curvas parciales** y experiencia previa en otras tareas.
+* Detener el entrenamiento temprano si se predice que la configuración no será competitiva.
+* Comparar formas de curvas parciales con curvas completas de tareas anteriores para seleccionar configuraciones prometedoras.
+* Reducir el número de configuraciones a evaluar usando un **portfolio** de configuraciones históricamente efectivas y diversas.
+* Integrar métricas de eficiencia, como tiempo de entrenamiento, para optimizar el trade-off entre rendimiento y coste computacional.
+
+![learning_curve](learning_curve.png)
 
 ---
 
 ### **Sección 3: Learning from Task Properties**
 
-#### 3.1. Meta-Features
-**Concepto:** Características que describen propiedades de los datasets/tareas.
+**Concepto:** Usar propiedades de cada tarea (meta-features) para estimar similitud entre datasets y predecir qué configuraciones/modelos funcionarán mejor.
 
-**Categorías de meta-features (Tabla 1 del documento):**
+**Idea central:**
+Cada tarea se representa como un vector de meta-features. Con ellos se pueden:
+
+* Medir distancia/similitud entre tareas
+* Transferir configuraciones exitosas (“portfolio”)
+* Entrenar meta-modelos que predicen el rendimiento de configuraciones en nuevas tareas
+* Reducir el costo de exploración evitando configuraciones malas desde el inicio
+
+**Aplicación al proyecto:**
+
+* 🧩 Permite mapear tareas nuevas al espacio de datasets históricos (OpenML, etc.)
+* 🚀 Base para seleccionar configuraciones iniciales antes de entrenar
+* 🔍 Precedente directo para integrar las curvas de aprendizaje parciales
+
+---
+
+#### **3.1. Meta-Features**
+
+**Concepto:** Características numéricas que describen las propiedades estructurales, estadísticas y de complejidad de un dataset.
+
+**Categorías principales:**
 
 1. **Simples:**
-   - Número de instancias (n)
-   - Número de características (p)
-   - Número de clases (c)
-   - Valores faltantes, outliers
+
+   * Número de instancias
+   * Número de atributos
+   * Número de clases
+   * Porcentaje de valores faltantes, outliers
 
 2. **Estadísticas:**
-   - Skewness, Kurtosis
-   - Correlación, Covarianza
-   - Concentración, Sparsity
+
+   * Media, varianza, skewness, kurtosis
+   * Covarianza, correlación
+   * Sparsity, concentración
 
 3. **Basadas en información:**
-   - Entropía de clases
-   - Información mutua
-   - Coeficiente de incertidumbre
+
+   * Entropía de clases
+   * Información mutua
+   * Coeficiente de incertidumbre
 
 4. **Basadas en complejidad:**
-   - Fisher's discriminative ratio
-   - Volume of overlap
-   - Concept variation
+
+   * Fisher discriminative ratio
+   * Volume of overlap
+   * Measures de separabilidad y variación del concepto
 
 5. **Landmarking:**
-   - Rendimiento de algoritmos simples (1NN, Tree, Linear, Naive Bayes)
-   - Relative landmarks
+
+   * Rendimiento de clasificadores simples (1NN, Árbol, Regresión lineal, Naive Bayes)
+   * Relative landmarks para comparar tareas rápidamente
 
 **Aplicación al proyecto:**
-- ✅ **MUY RELEVANTE:** El proyecto ya tiene `meta_features.py` que extrae características similares
-- ✅ Pueden expandirse las meta-features según las categorías del documento
-- ✅ OpenML proporciona muchas de estas características automáticamente
+
+* 🛠️ Conectar los meta-features calculados con los del estándar en meta-learning
+* 🔄 Normalizar y reducir dimensionalidad antes de comparar tareas
+* 📦 Usar estas representaciones para buscar tareas similares y seleccionar configuraciones iniciales
+
+---
 
 #### 3.2. Learning Meta-Features
-**Concepto:** Aprender representaciones de tareas en lugar de definirlas manualmente.
 
-**Técnicas:**
-- Generar meta-features binarias basadas en comparaciones de algoritmos
-- Usar redes Siamese para aprender representaciones de tareas similares
+**Concepto:**
+En vez de definir meta-features manualmente, se pueden **aprender representaciones automáticas** que capturen similitudes entre tareas usando meta-datos de rendimiento o combinaciones de configuraciones.
 
-#### 3.3. Warm-Starting Optimization from Similar Tasks
-**Concepto:** Inicializar búsquedas de optimización con configuraciones prometedoras de tareas similares.
+**Enfoques principales:**
 
-**Técnicas:**
-- k-NN basado en meta-features para encontrar tareas similares
-- Usar mejores configuraciones de tareas similares para inicializar algoritmos genéticos o Bayesian optimization
+1. **Meta-features binarios aprendidos (comparación de configuraciones):**
+
+   * Se comparan pares de configuraciones ((\theta_a, \theta_b)) en tareas previas.
+   * Se aprende si una configuración supera a otra.
+   * Produce meta-features del tipo: “¿(\theta_a) vence a (\theta_b)?”.
+
+2. **Representaciones aprendidas desde el rendimiento (P):**
+
+   * Se aprende una función (f : P \times \Theta \rightarrow M') usando redes neuronales.
+   * Captura patrones globales de comportamiento de configuraciones.
+
+3. **Redes siamesas (si las tareas comparten el mismo input):**
+
+   * Two networks comparten pesos y reciben dos tareas distintas.
+   * Tareas similares se mapean cerca en el espacio latente.
+   * Útiles para *warm-start* en optimización bayesiana y NAS.
 
 **Aplicación al proyecto:**
-- ✅ Puede implementarse en `meta_learner.py`
-- ✅ Combinar con búsqueda de hiperparámetros
+
+* Permite extender los meta-features clásicos con representaciones aprendidas.
+* Ideal cuando el número de tareas es grande y se quiere capturar relaciones complejas.
+* Compatible con usar tus matrices (P) y configuraciones (\Theta) como entrada directa.
+
+---
+
+#### 3.3 Warm-Starting Optimization from Similar Tasks
+
+**Concepto:** Los meta-features permiten estimar qué tareas son similares y usar ese conocimiento para inicializar algoritmos de optimización.
+
+**Ideas centrales:**
+
+- **Búsqueda genética y PSO**: Seleccionar las k tareas más similares midiendo distancia L1 entre sus vectores de meta-features. De cada una se toma la mejor configuración y se usa para inicializar la optimización. 
+- **Optimización basada en modelos (SMBO):** Modelos como **SCoT** entrenan un surrogate que predice el ranking esperado de cada configuración, usando meta-features simples + PCA. Luego convierten esos rankings en probabilidades para hacer optimización bayesiana.
+- **Redes neuroanles como modelo sustituto:** Algunos métodos usan **MLPs** modificados para apredner representaciones latentes de tareas y modelar similitudes. Como no modelan incertidumbre directamente, entrenan ensembles de MLPs.
+- **Modelos más escalables:** Otros trabajos entrenan un único modelo pero solo con tareas similares, normalizando escalas para que la comparación sea consistente.
+- **Métodos prácticos y escalable:** Ver **Feurer et al.(2014-2015--Auto-sklearn)** ordenan las tareas por similitud usando 46 meta-features y usan las mejores configuraciones de las tareas más parecidas como warm-start para Bayesian Optimization. Funcioan increíblemente bien en la práctica.
+- **Filtrado colaborativo:** Se trata el problema como recomendación: tareas = usuarios, configuraciones=ítems, evaluaciones Pi,j = ratings. La matriz se factoriza para predecir configuraciones prometedoras.Necesita algunas evaluaciones iniciales (cold start), pero puede mitigarse combinando meta-features y diseño óptimo de experimentos
+
+---
 
 #### 3.4. Meta-Models
 
